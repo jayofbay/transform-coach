@@ -532,6 +532,16 @@ export default function App() {
     notify("Client added!");
   };
 
+  const changeWeek = async (delta) => {
+    if (!client) return;
+    const newWeek = Math.max(1, Math.min(client.totalWeeks, client.weekNum + delta));
+    if (newWeek === client.weekNum) return;
+    const updatedClient = { ...client, weekNum: newWeek };
+    setClient(updatedClient);
+    setClients(prev => prev.map(c => c.thread_id === client.thread_id ? updatedClient : c));
+    await supabase.from("clients").update({ week_num: newWeek }).eq("thread_id", client.thread_id);
+  };
+
   const pct = (v, s, t) => Math.round(((v - s) / (t - s)) * 100);
   const weightPct = client ? pct(client.weight, client.startWeight, client.targetWeight) : 0;
   const compColor = c => c >= 85 ? "#00C896" : c >= 65 ? "#FFB800" : "#FF4D00";
@@ -1079,7 +1089,20 @@ export default function App() {
                     }}>{client.avatar}</div>
                     <div>
                       <div style={{ fontFamily: "Barlow Condensed", fontSize: 24, fontWeight: 800 }}>{client.name}</div>
-                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginTop: 2 }}>{client.goal} • Wk {client.weekNum}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                        <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>{client.goal}</span>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <button className="btn" onClick={() => changeWeek(-1)} disabled={client.weekNum <= 1} style={{
+                            background: "none", border: "none", color: client.weekNum <= 1 ? "rgba(255,255,255,0.15)" : client.accent,
+                            fontSize: 16, padding: "0 2px", lineHeight: 1, cursor: client.weekNum <= 1 ? "default" : "pointer"
+                          }}>‹</button>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: client.accent }}>Wk {client.weekNum}/{client.totalWeeks}</span>
+                          <button className="btn" onClick={() => changeWeek(1)} disabled={client.weekNum >= client.totalWeeks} style={{
+                            background: "none", border: "none", color: client.weekNum >= client.totalWeeks ? "rgba(255,255,255,0.15)" : client.accent,
+                            fontSize: 16, padding: "0 2px", lineHeight: 1, cursor: client.weekNum >= client.totalWeeks ? "default" : "pointer"
+                          }}>›</button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                   <button className="btn" onClick={() => setShowModal(true)} style={{
