@@ -252,6 +252,12 @@ export default function App() {
   const [planForm, setPlanForm] = useState({ type: "strength", label: "", exercises: [{ name: "", sets: "", weight: "" }] });
   const [tick, setTick] = useState(0);
 
+  // ── Invoice state ──
+  const [invoices, setInvoices] = useState([]);
+  const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  const [invoiceForm, setInvoiceForm] = useState({ description: "", amount: "", dueDate: "" });
+  const [creatingInvoice, setCreatingInvoice] = useState(false);
+
   // ── Messaging state ──
   const [messages, setMessages] = useState([]);
   const [msgInput, setMsgInput] = useState("");
@@ -437,6 +443,31 @@ export default function App() {
     };
   }, [client?.thread_id]);
 
+  // ─── Supabase: Fetch invoices + real-time subscription ───────────────────
+  useEffect(() => {
+    if (!client) return;
+    const threadId = client.thread_id;
+
+    setInvoices([]);
+
+    supabase
+      .from("invoices")
+      .select("*")
+      .eq("thread_id", threadId)
+      .order("created_at", { ascending: false })
+      .then(({ data }) => { if (data) setInvoices(data); });
+
+    const channel = supabase
+      .channel(`invoices-channel-${threadId}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "invoices", filter: `thread_id=eq.${threadId}` },
+        (payload) => setInvoices(prev => [payload.new, ...prev]))
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "invoices", filter: `thread_id=eq.${threadId}` },
+        (payload) => setInvoices(prev => prev.map(i => i.id === payload.new.id ? payload.new : i)))
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
+  }, [client?.thread_id]);
+
   // ─── Helpers ─────────────────────────────────────────────────────────────
   const notify = (msg, ok = true) => {
     setNotif({ msg, ok });
@@ -449,6 +480,32 @@ export default function App() {
     ...f, exercises: f.exercises.map((ex, idx) => idx === i ? { ...ex, [field]: val } : ex)
   }));
 
+  const handleCreateInvoice = async () => {
+    if (!invoiceForm.description.trim() || !invoiceForm.amount) return;
+    setCreatingInvoice(true);
+    try {
+      const res = await fetch("/api/create-invoice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          thread_id: client.thread_id,
+          amount_cents: Math.round(parseFloat(invoiceForm.amount) * 100),
+          description: invoiceForm.description.trim(),
+          due_date: invoiceForm.dueDate || null,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Failed to create invoice");
+      setInvoiceForm({ description: "", amount: "", dueDate: "" });
+      setShowInvoiceModal(false);
+      notify("Invoice sent to client!");
+    } catch (e) {
+      notify(e.message, false);
+    } finally {
+      setCreatingInvoice(false);
+    }
+  };
+
   const handleClientSelect = (c) => {
     setClient(c);
     setView("week");
@@ -457,6 +514,7 @@ export default function App() {
     setMessages([]);
     setFoodPhotos([]);
     setProgressPhotos([]);
+    setInvoices([]);
     setLiveExLogs([]);
   };
 
@@ -842,6 +900,72 @@ export default function App() {
                 letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 40
               }}>
                 Send to Athlete ↑
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* SEND INVOICE MODAL */}
+        {showInvoiceModal && client && (
+          <div style={{
+            position: "absolute", inset: 0, background: "#0A0A0A", zIndex: 1000,
+            display: "flex", flexDirection: "column", animation: "slideUp 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)"
+          }}>
+            {/* Header */}
+            <div style={{ padding: "20px 24px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontFamily: "Barlow Condensed", fontSize: 22, fontWeight: 800 }}>Send Invoice</div>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginTop: 2 }}>to {client.name}</div>
+              </div>
+              <button className="btn" onClick={() => setShowInvoiceModal(false)} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 10, width: 36, height: 36, color: "rgba(255,255,255,0.6)", fontSize: 18, cursor: "pointer" }}>✕</button>
+            </div>
+
+            {/* Form */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "24px" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {[
+                  { label: "Description", key: "description", placeholder: "e.g. Monthly coaching — April", type: "text" },
+                  { label: "Amount (USD)", key: "amount", placeholder: "e.g. 150.00", type: "number" },
+                  { label: "Due Date (optional)", key: "dueDate", placeholder: "", type: "date" },
+                ].map(f => (
+                  <div key={f.key}>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>{f.label}</div>
+                    <input
+                      type={f.type}
+                      placeholder={f.placeholder}
+                      value={invoiceForm[f.key]}
+                      onChange={e => setInvoiceForm(p => ({ ...p, [f.key]: e.target.value }))}
+                      style={{
+                        width: "100%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                        borderRadius: 12, padding: "12px 14px", color: "#fff", fontSize: 15, outline: "none", fontFamily: "inherit",
+                      }}
+                    />
+                  </div>
+                ))}
+
+                {/* Preview */}
+                {invoiceForm.amount && (
+                  <div style={{ background: `${client.accent}10`, border: `1px solid ${client.accent}30`, borderRadius: 14, padding: "14px 16px" }}>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", marginBottom: 4 }}>Invoice preview</div>
+                    <div style={{ fontFamily: "Barlow Condensed", fontSize: 28, fontWeight: 800, color: client.accent }}>
+                      ${parseFloat(invoiceForm.amount || 0).toFixed(2)}
+                    </div>
+                    <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", marginTop: 2 }}>{invoiceForm.description || "—"}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div style={{ padding: "16px 24px 32px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+              <button className="btn" onClick={handleCreateInvoice} disabled={creatingInvoice || !invoiceForm.description.trim() || !invoiceForm.amount} style={{
+                width: "100%", background: invoiceForm.description.trim() && invoiceForm.amount ? client.accent : "rgba(255,255,255,0.08)",
+                border: "none", borderRadius: 14, padding: "16px", color: "#fff",
+                fontSize: 16, fontWeight: 800, fontFamily: "Barlow Condensed", letterSpacing: "0.05em",
+                cursor: invoiceForm.description.trim() && invoiceForm.amount ? "pointer" : "default",
+                opacity: creatingInvoice ? 0.6 : 1,
+              }}>
+                {creatingInvoice ? "Creating..." : "SEND INVOICE VIA STRIPE"}
               </button>
             </div>
           </div>
@@ -1576,6 +1700,81 @@ export default function App() {
                   );
                 })()}
 
+                {/* ─── BILLING ─── */}
+                {view === "billing" && (
+                  <div className="fade-up" style={{ padding: "20px 24px 40px", overflowY: "auto", flex: 1 }}>
+                    {/* Header */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                      <div>
+                        <div style={{ fontFamily: "Barlow Condensed", fontSize: 22, fontWeight: 800 }}>Invoices</div>
+                        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginTop: 2 }}>
+                          {invoices.filter(i => i.status === "pending").length} pending · {invoices.filter(i => i.status === "paid").length} paid
+                        </div>
+                      </div>
+                      <button className="btn" onClick={() => setShowInvoiceModal(true)} style={{
+                        background: client.accent, border: "none", borderRadius: 12, padding: "10px 16px",
+                        color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+                      }}>
+                        + Send Invoice
+                      </button>
+                    </div>
+
+                    {/* Invoice list */}
+                    {invoices.length === 0 ? (
+                      <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: "40px 20px", textAlign: "center" }}>
+                        <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.25 }}>🧾</div>
+                        <div style={{ fontSize: 14, color: "rgba(255,255,255,0.35)" }}>No invoices yet</div>
+                        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.2)", marginTop: 6 }}>Tap "Send Invoice" to create one</div>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                        {invoices.map(inv => (
+                          <div key={inv.id} style={{
+                            background: "rgba(255,255,255,0.03)",
+                            border: `1px solid ${inv.status === "paid" ? "rgba(0,200,150,0.25)" : inv.status === "cancelled" ? "rgba(255,255,255,0.08)" : `${client.accent}33`}`,
+                            borderRadius: 16, padding: "16px 18px",
+                          }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", marginBottom: 4 }}>{inv.description}</div>
+                                <div style={{ fontFamily: "Barlow Condensed", fontSize: 26, fontWeight: 800, color: inv.status === "paid" ? "#00C896" : client.accent }}>
+                                  ${(inv.amount_cents / 100).toFixed(2)}
+                                </div>
+                                {inv.due_date && (
+                                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>Due {inv.due_date}</div>
+                                )}
+                                {inv.paid_at && (
+                                  <div style={{ fontSize: 11, color: "#00C896", marginTop: 4 }}>Paid {new Date(inv.paid_at).toLocaleDateString()}</div>
+                                )}
+                                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", marginTop: 4 }}>
+                                  Sent {new Date(inv.created_at).toLocaleDateString()}
+                                </div>
+                              </div>
+                              <div style={{
+                                fontSize: 11, fontWeight: 700, padding: "5px 12px", borderRadius: 8, textTransform: "uppercase", letterSpacing: 0.5,
+                                background: inv.status === "paid" ? "rgba(0,200,150,0.15)" : inv.status === "cancelled" ? "rgba(255,255,255,0.06)" : `${client.accent}20`,
+                                color: inv.status === "paid" ? "#00C896" : inv.status === "cancelled" ? "rgba(255,255,255,0.3)" : client.accent,
+                              }}>
+                                {inv.status}
+                              </div>
+                            </div>
+                            {inv.status === "pending" && inv.stripe_payment_link_url && (
+                              <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+                                <a href={inv.stripe_payment_link_url} target="_blank" rel="noopener noreferrer" style={{
+                                  fontSize: 12, color: client.accent, textDecoration: "none", fontWeight: 600,
+                                  padding: "6px 12px", background: `${client.accent}15`, borderRadius: 8, border: `1px solid ${client.accent}30`,
+                                }}>
+                                  View Payment Link ↗
+                                </a>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* ─── CHAT ─── */}
                 {view === "chat" && (
                   <div className="fade-up" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
@@ -1686,6 +1885,7 @@ export default function App() {
                   { id: "build", icon: "🛠️", label: "Build" },
                   { id: "chat", icon: "💬", label: "Chat", badge: messages.filter(m => m.sender === "client").length > 0 },
                   { id: "photos", icon: "📸", label: "Photos" },
+                  { id: "billing", icon: "💳", label: "Billing", badge: invoices.some(i => i.status === "pending") },
                 ].map(tab => (
                   <div key={tab.id} onClick={() => setView(tab.id)} style={{
                     display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flex: 1, cursor: "pointer",
