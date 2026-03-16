@@ -1,15 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "./lib/supabase";
 
-// ─── THREAD ID ───────────────────────────────────────────────────────────────
-
-const THREAD_ID = "default";
-
 // ─── DATA ────────────────────────────────────────────────────────────────────
-
+// Hardcoded CLIENTS kept as seed/session data reference by thread_id
 const CLIENTS = [
   {
-    id: 1, name: "Jordan Blake", avatar: "JB", goal: "Fat Loss", phase: "Cut",
+    id: 1, thread_id: "jordan-blake", name: "Jordan Blake", avatar: "JB", goal: "Fat Loss", phase: "Cut",
     watch: "Apple Watch Series 9", connected: true,
     weight: 89.4, startWeight: 102, targetWeight: 78,
     bodyFat: 24.1, startBodyFat: 31, targetBodyFat: 15,
@@ -60,7 +56,7 @@ const CLIENTS = [
     ],
   },
   {
-    id: 2, name: "Priya Sharma", avatar: "PS", goal: "Muscle Gain", phase: "Bulk",
+    id: 2, thread_id: "priya-sharma", name: "Priya Sharma", avatar: "PS", goal: "Muscle Gain", phase: "Bulk",
     watch: "Garmin Venu 3", connected: true,
     weight: 58.2, startWeight: 54, targetWeight: 62,
     bodyFat: 21.3, startBodyFat: 23, targetBodyFat: 20,
@@ -103,7 +99,7 @@ const CLIENTS = [
     ],
   },
   {
-    id: 3, name: "Marcus Webb", avatar: "MW", goal: "Recomp", phase: "Maintenance",
+    id: 3, thread_id: "marcus-webb", name: "Marcus Webb", avatar: "MW", goal: "Recomp", phase: "Maintenance",
     watch: null, connected: false,
     weight: 84.0, startWeight: 84, targetWeight: 82,
     bodyFat: 18.5, startBodyFat: 22, targetBodyFat: 14,
@@ -144,6 +140,38 @@ const CLIENTS = [
 
 const PHASES = ["Cut", "Bulk", "Maintenance", "Peak Week"];
 const GOALS = ["Fat Loss", "Muscle Gain", "Recomp", "Athletic Performance"];
+
+// ─── Helper: map a DB row to UI client shape ──────────────────────────────────
+function mapDbClientToUi(row) {
+  // Look up seed data by thread_id
+  const seed = CLIENTS.find(c => c.thread_id === row.thread_id);
+  return {
+    id: row.id,
+    thread_id: row.thread_id,
+    name: row.name,
+    avatar: row.avatar || "?",
+    goal: row.goal || "Fat Loss",
+    phase: row.phase || "Cut",
+    accent: row.accent_color || "#FF4D00",
+    watch: row.watch || null,
+    connected: row.connected || false,
+    weight: row.weight || 0,
+    startWeight: row.start_weight || 0,
+    targetWeight: row.target_weight || 0,
+    bodyFat: row.body_fat || 0,
+    startBodyFat: row.start_body_fat || 0,
+    targetBodyFat: row.target_body_fat || 0,
+    weekNum: row.week_num || 1,
+    totalWeeks: row.total_weeks || 16,
+    compliance: row.compliance || 0,
+    streak: row.streak || 0,
+    // Use seed data if available, otherwise empty defaults
+    sessions: seed ? seed.sessions : [],
+    stats: seed ? seed.stats : { calories: 0, protein: 0, steps: 0, sleep: 0, water: 0 },
+    measurements: seed ? seed.measurements : { chest: 0, waist: 0, hips: 0, arms: 0, thighs: 0 },
+    weightHistory: seed ? seed.weightHistory : [row.weight || 0],
+  };
+}
 
 // ─── SUB-COMPONENTS ───────────────────────────────────────────────────────────
 
@@ -204,9 +232,22 @@ const StatPill = ({ icon, value, label, color, minWidth }) => (
 
 export default function App() {
   const [view, setView] = useState("clients"); // clients | week | body | build | chat
-  const [client, setClient] = useState(CLIENTS[0]);
+  const [clients, setClients] = useState([]);
+  const [clientsLoading, setClientsLoading] = useState(true);
+  const [client, setClient] = useState(null);
   const [activeDay, setActiveDay] = useState(null);
   const [showModal, setShowModal] = useState(false);
+  const [showAddClient, setShowAddClient] = useState(false);
+  const [newClientForm, setNewClientForm] = useState({
+    name: '',
+    goal: 'Fat Loss',
+    phase: 'Cut',
+    startWeight: '',
+    targetWeight: '',
+    bodyFat: '',
+    totalWeeks: '16',
+    accentColor: '#FF4D00',
+  });
   const [notification, setNotif] = useState(null);
   const [planForm, setPlanForm] = useState({ type: "strength", label: "", exercises: [{ name: "", sets: "", weight: "" }] });
   const [tick, setTick] = useState(0);
@@ -235,13 +276,39 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  // ─── Supabase: Fetch messages on mount + real-time subscription ──────────
+  // ─── Supabase: Fetch clients on mount ────────────────────────────────────
   useEffect(() => {
-    // Initial fetch
+    setClientsLoading(true);
+    supabase
+      .from("clients")
+      .select("*")
+      .order("created_at", { ascending: true })
+      .then(({ data, error }) => {
+        if (!error && data && data.length > 0) {
+          const mapped = data.map(mapDbClientToUi);
+          setClients(mapped);
+          setClient(mapped[0]);
+        } else {
+          // Fallback to hardcoded if DB is empty or errors
+          setClients(CLIENTS);
+          setClient(CLIENTS[0]);
+        }
+        setClientsLoading(false);
+      });
+  }, []);
+
+  // ─── Supabase: Fetch messages + real-time subscription ───────────────────
+  useEffect(() => {
+    if (!client) return;
+    const threadId = client.thread_id;
+
+    // Reset and fetch for new client
+    setMessages([]);
+
     supabase
       .from("messages")
       .select("*")
-      .eq("thread_id", THREAD_ID)
+      .eq("thread_id", threadId)
       .order("created_at", { ascending: true })
       .then(({ data, error }) => {
         if (!error && data) setMessages(data);
@@ -249,13 +316,12 @@ export default function App() {
 
     // Real-time subscription for new messages
     const channel = supabase
-      .channel("messages-channel")
+      .channel(`messages-channel-${threadId}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages", filter: `thread_id=eq.${THREAD_ID}` },
+        { event: "INSERT", schema: "public", table: "messages", filter: `thread_id=eq.${threadId}` },
         (payload) => {
           setMessages((prev) => {
-            // Avoid duplicates (our own INSERT may have already been added optimistically)
             if (prev.some((m) => m.id === payload.new.id)) return prev;
             return [...prev, payload.new];
           });
@@ -266,7 +332,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [client?.thread_id]);
 
   // ─── Supabase: Scroll to bottom when messages change ────────────────────
   useEffect(() => {
@@ -277,24 +343,26 @@ export default function App() {
 
   // ─── Supabase: Fetch exercise_logs + real-time subscription ─────────────
   useEffect(() => {
+    if (!client) return;
+    const threadId = client.thread_id;
     const today = new Date().toISOString().split("T")[0];
 
-    // Initial fetch for today
+    setLiveExLogs([]);
+
     supabase
       .from("exercise_logs")
       .select("*")
-      .eq("thread_id", THREAD_ID)
+      .eq("thread_id", threadId)
       .gte("logged_at", today + "T00:00:00")
       .then(({ data, error }) => {
         if (!error && data) setLiveExLogs(data);
       });
 
-    // Real-time subscription
     const channel = supabase
-      .channel("exercise-logs-channel")
+      .channel(`exercise-logs-channel-${threadId}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "exercise_logs", filter: `thread_id=eq.${THREAD_ID}` },
+        { event: "*", schema: "public", table: "exercise_logs", filter: `thread_id=eq.${threadId}` },
         (payload) => {
           if (payload.eventType === "INSERT") {
             setLiveExLogs((prev) => {
@@ -315,36 +383,46 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [client?.thread_id]);
 
-  // ─── Supabase: Fetch food_photo_logs on mount ────────────────────────────
+  // ─── Supabase: Fetch food_photo_logs ─────────────────────────────────────
   useEffect(() => {
+    if (!client) return;
+    const threadId = client.thread_id;
+
+    setFoodPhotos([]);
+
     supabase
       .from("food_photo_logs")
       .select("*")
-      .eq("thread_id", THREAD_ID)
+      .eq("thread_id", threadId)
       .order("created_at", { ascending: false })
       .then(({ data, error }) => {
         if (!error && data) setFoodPhotos(data);
       });
-  }, []);
+  }, [client?.thread_id]);
 
   // ─── Supabase: Fetch progress_photos + real-time subscription ────────────
   useEffect(() => {
+    if (!client) return;
+    const threadId = client.thread_id;
+
+    setProgressPhotos([]);
+
     supabase
       .from("progress_photos")
       .select("*")
-      .eq("thread_id", THREAD_ID)
+      .eq("thread_id", threadId)
       .order("created_at", { ascending: false })
       .then(({ data, error }) => {
         if (!error && data) setProgressPhotos(data);
       });
 
     const channel = supabase
-      .channel("progress-photos-channel")
+      .channel(`progress-photos-channel-${threadId}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "progress_photos", filter: `thread_id=eq.${THREAD_ID}` },
+        { event: "INSERT", schema: "public", table: "progress_photos", filter: `thread_id=eq.${threadId}` },
         (payload) => {
           setProgressPhotos((prev) => {
             if (prev.some((p) => p.id === payload.new.id)) return prev;
@@ -357,7 +435,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [client?.thread_id]);
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
   const notify = (msg, ok = true) => {
@@ -375,10 +453,87 @@ export default function App() {
     setClient(c);
     setView("week");
     setActiveDay(null);
+    // Reset data state — subscriptions will re-fetch on client change
+    setMessages([]);
+    setFoodPhotos([]);
+    setProgressPhotos([]);
+    setLiveExLogs([]);
+  };
+
+  // ─── Add New Client ───────────────────────────────────────────────────────
+  const handleAddClient = async () => {
+    if (!newClientForm.name.trim()) {
+      notify("Name is required", false);
+      return;
+    }
+
+    const nameTrimmed = newClientForm.name.trim();
+
+    // Generate avatar from initials
+    const parts = nameTrimmed.split(/\s+/);
+    const avatar = (parts.length >= 2
+      ? parts[0][0] + parts[1][0]
+      : parts[0].slice(0, 2)
+    ).toUpperCase();
+
+    // Generate thread_id as slug
+    const thread_id = nameTrimmed
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9-]/g, '');
+
+    const insertPayload = {
+      thread_id,
+      name: nameTrimmed,
+      avatar,
+      goal: newClientForm.goal,
+      phase: newClientForm.phase,
+      start_weight: newClientForm.startWeight ? parseFloat(newClientForm.startWeight) : null,
+      target_weight: newClientForm.targetWeight ? parseFloat(newClientForm.targetWeight) : null,
+      weight: newClientForm.startWeight ? parseFloat(newClientForm.startWeight) : null,
+      body_fat: newClientForm.bodyFat ? parseFloat(newClientForm.bodyFat) : null,
+      start_body_fat: newClientForm.bodyFat ? parseFloat(newClientForm.bodyFat) : null,
+      target_body_fat: null,
+      total_weeks: parseInt(newClientForm.totalWeeks) || 16,
+      week_num: 1,
+      compliance: 0,
+      streak: 0,
+      accent_color: newClientForm.accentColor,
+      connected: false,
+      watch: null,
+    };
+
+    const { data, error } = await supabase
+      .from("clients")
+      .insert(insertPayload)
+      .select()
+      .single();
+
+    if (error) {
+      notify(error.message || "Failed to add client", false);
+      return;
+    }
+
+    const newClient = mapDbClientToUi(data);
+    setClients(prev => [...prev, newClient]);
+    setShowAddClient(false);
+    setNewClientForm({
+      name: '',
+      goal: 'Fat Loss',
+      phase: 'Cut',
+      startWeight: '',
+      targetWeight: '',
+      bodyFat: '',
+      totalWeeks: '16',
+      accentColor: '#FF4D00',
+    });
+    setClient(newClient);
+    setView("week");
+    notify("Client added!");
   };
 
   const pct = (v, s, t) => Math.round(((v - s) / (t - s)) * 100);
-  const weightPct = pct(client.weight, client.startWeight, client.targetWeight);
+  const weightPct = client ? pct(client.weight, client.startWeight, client.targetWeight) : 0;
   const compColor = c => c >= 85 ? "#00C896" : c >= 65 ? "#FFB800" : "#FF4D00";
 
   const typeConfig = {
@@ -396,19 +551,19 @@ export default function App() {
   // ─── Messaging: send message to Supabase ─────────────────────────────────
   const sendMessage = async () => {
     const content = msgInput.trim();
-    if (!content || msgSending) return;
+    if (!content || msgSending || !client) return;
     setMsgSending(true);
     setMsgInput("");
 
     const { error } = await supabase.from("messages").insert({
-      thread_id: THREAD_ID,
+      thread_id: client.thread_id,
       sender: "coach",
       content,
     });
 
     if (error) {
       notify("Failed to send message", false);
-      setMsgInput(content); // restore on failure
+      setMsgInput(content);
     }
     setMsgSending(false);
   };
@@ -418,7 +573,6 @@ export default function App() {
     setSelectedPhoto(photo);
     setPhotoFeedback(photo.coach_feedback || "");
 
-    // Mark as seen if not yet
     if (!photo.coach_seen) {
       const { data } = await supabase
         .from("food_photo_logs")
@@ -456,6 +610,8 @@ export default function App() {
   const todayDoneCount = liveExLogs.filter((l) => l.done).length;
   const todayTotalCount = liveExLogs.length;
 
+  const ACCENT_SWATCHES = ['#FF4D00', '#00C896', '#FFB800', '#818CF8', '#06B6D4', '#F43F5E'];
+
   return (
     <div style={{
       fontFamily: "'Barlow', 'Barlow Condensed', sans-serif",
@@ -477,6 +633,7 @@ export default function App() {
         @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
         @keyframes slideDown { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .fade-up { animation: fadeUp 0.35s ease both; }
         .live { animation: pulse 2.5s infinite; }
         .notif { animation: slideDown 0.25s ease; }
@@ -576,7 +733,7 @@ export default function App() {
                 onClick={saveFeedback}
                 disabled={savingFeedback}
                 style={{
-                  width: "100%", background: client.accent, border: "none", borderRadius: 14,
+                  width: "100%", background: client?.accent || "#FF4D00", border: "none", borderRadius: 14,
                   padding: "16px", color: "white", fontSize: 15, fontWeight: 700,
                   fontFamily: "Barlow Condensed, sans-serif", letterSpacing: "0.06em",
                   textTransform: "uppercase", opacity: savingFeedback ? 0.6 : 1, marginBottom: 40
@@ -589,7 +746,7 @@ export default function App() {
         )}
 
         {/* FULL SCREEN MODAL (New Session Plan) */}
-        {showModal && (
+        {showModal && client && (
           <div style={{
             position: "absolute", inset: 0, background: "#0A0A0A", zIndex: 1000,
             display: "flex", flexDirection: "column", animation: "slideUp 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)"
@@ -680,6 +837,153 @@ export default function App() {
           </div>
         )}
 
+        {/* ADD NEW CLIENT MODAL */}
+        {showAddClient && (
+          <div style={{
+            position: "absolute", inset: 0, background: "#0A0A0A", zIndex: 1000,
+            display: "flex", flexDirection: "column", animation: "slideUp 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)"
+          }}>
+            <div style={{ padding: "50px 24px 20px", borderBottom: "1px solid rgba(255,255,255,0.1)", display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+              <div>
+                <div style={{ fontFamily: "Barlow Condensed", fontSize: 26, fontWeight: 800 }}>NEW CLIENT</div>
+                <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", marginTop: 2 }}>Add a client to your roster</div>
+              </div>
+              <button onClick={() => setShowAddClient(false)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: "50%", width: 32, height: 32, color: "white", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+            </div>
+
+            <div className="no-scroll" style={{ flex: 1, overflowY: "auto", padding: 24 }}>
+
+              {/* Name */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8, textTransform: "uppercase", fontWeight: 600 }}>Name</div>
+                <input
+                  style={inputStyle}
+                  placeholder="e.g. Alex Johnson"
+                  value={newClientForm.name}
+                  onChange={e => setNewClientForm(f => ({ ...f, name: e.target.value }))}
+                />
+              </div>
+
+              {/* Goal */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8, textTransform: "uppercase", fontWeight: 600 }}>Goal</div>
+                <select
+                  style={inputStyle}
+                  value={newClientForm.goal}
+                  onChange={e => setNewClientForm(f => ({ ...f, goal: e.target.value }))}
+                >
+                  <option>Fat Loss</option>
+                  <option>Muscle Gain</option>
+                  <option>Recomp</option>
+                </select>
+              </div>
+
+              {/* Phase */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8, textTransform: "uppercase", fontWeight: 600 }}>Phase</div>
+                <select
+                  style={inputStyle}
+                  value={newClientForm.phase}
+                  onChange={e => setNewClientForm(f => ({ ...f, phase: e.target.value }))}
+                >
+                  <option>Cut</option>
+                  <option>Bulk</option>
+                  <option>Maintenance</option>
+                </select>
+              </div>
+
+              {/* Start Weight & Target Weight */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8, textTransform: "uppercase", fontWeight: 600 }}>Start Weight kg</div>
+                  <input
+                    type="number"
+                    style={inputStyle}
+                    placeholder="e.g. 90"
+                    value={newClientForm.startWeight}
+                    onChange={e => setNewClientForm(f => ({ ...f, startWeight: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8, textTransform: "uppercase", fontWeight: 600 }}>Target Weight kg</div>
+                  <input
+                    type="number"
+                    style={inputStyle}
+                    placeholder="e.g. 78"
+                    value={newClientForm.targetWeight}
+                    onChange={e => setNewClientForm(f => ({ ...f, targetWeight: e.target.value }))}
+                  />
+                </div>
+              </div>
+
+              {/* Body Fat & Total Weeks */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8, textTransform: "uppercase", fontWeight: 600 }}>Current Body Fat %</div>
+                  <input
+                    type="number"
+                    style={inputStyle}
+                    placeholder="e.g. 22"
+                    value={newClientForm.bodyFat}
+                    onChange={e => setNewClientForm(f => ({ ...f, bodyFat: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8, textTransform: "uppercase", fontWeight: 600 }}>Total Weeks</div>
+                  <input
+                    type="number"
+                    style={inputStyle}
+                    placeholder="16"
+                    value={newClientForm.totalWeeks}
+                    onChange={e => setNewClientForm(f => ({ ...f, totalWeeks: e.target.value }))}
+                  />
+                </div>
+              </div>
+
+              {/* Accent Color */}
+              <div style={{ marginBottom: 40 }}>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 12, textTransform: "uppercase", fontWeight: 600 }}>Accent Color</div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  {ACCENT_SWATCHES.map(color => (
+                    <div
+                      key={color}
+                      className="btn"
+                      onClick={() => setNewClientForm(f => ({ ...f, accentColor: color }))}
+                      style={{
+                        width: 36, height: 36, borderRadius: "50%",
+                        background: color,
+                        border: newClientForm.accentColor === color
+                          ? "3px solid white"
+                          : "3px solid transparent",
+                        boxShadow: newClientForm.accentColor === color
+                          ? `0 0 10px ${color}80`
+                          : "none",
+                        cursor: "pointer",
+                        transition: "all 0.15s ease",
+                        flexShrink: 0,
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <button
+                className="btn"
+                onClick={handleAddClient}
+                style={{
+                  width: "100%", background: newClientForm.accentColor,
+                  border: "none", borderRadius: 14, padding: "18px",
+                  color: "white", fontSize: 16, fontWeight: 700,
+                  fontFamily: "Barlow Condensed, sans-serif",
+                  letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 40
+                }}
+              >
+                Add Client
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* FAKE iOS STATUS BAR */}
         <div style={{ height: 48, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 28px", fontSize: 14, fontWeight: 600, flexShrink: 0, zIndex: 10 }}>
           <span>9:41</span>
@@ -700,43 +1004,55 @@ export default function App() {
                 <div style={{ fontFamily: "Barlow Condensed", fontSize: 34, fontWeight: 800 }}>CLIENTS</div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(0,200,150,0.1)", padding: "6px 12px", borderRadius: 20 }}>
                   <div className="live" style={{ width: 6, height: 6, borderRadius: "50%", background: "#00C896" }} />
-                  <span style={{ fontSize: 11, color: "#00C896", fontWeight: 600 }}>{CLIENTS.filter(c => c.connected).length} Live</span>
+                  <span style={{ fontSize: 11, color: "#00C896", fontWeight: 600 }}>{clients.filter(c => c.connected).length} Live</span>
                 </div>
               </div>
 
               <div style={{ display: "flex", flexDirection: "column" }}>
-                {CLIENTS.map(c => (
-                  <div key={c.id} className="cl-item btn" onClick={() => handleClientSelect(c)} style={{
-                    padding: "16px 24px", display: "flex", alignItems: "center", gap: 16,
-                    borderBottom: "1px solid rgba(255,255,255,0.05)"
-                  }}>
+                {clientsLoading ? (
+                  <div style={{ padding: "40px 24px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
                     <div style={{
-                      width: 48, height: 48, borderRadius: 14,
-                      background: `${c.accent}15`, border: `2px solid ${c.accent}40`,
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      fontSize: 16, fontWeight: 700, color: c.accent, flexShrink: 0,
-                      fontFamily: "Barlow Condensed, sans-serif",
-                    }}>
-                      {c.avatar}
-                    </div>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>{c.name}</div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 6, background: `${c.accent}20`, color: c.accent, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.05em" }}>{c.phase.toUpperCase()}</span>
-                        <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Wk {c.weekNum}/{c.totalWeeks}</span>
-                      </div>
-                    </div>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 16, fontWeight: 700, color: compColor(c.compliance), fontFamily: "Barlow Condensed" }}>{c.compliance}%</div>
-                      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginTop: 2 }}>Compliance</div>
-                    </div>
-                    <div style={{ color: "rgba(255,255,255,0.2)", fontSize: 18, marginLeft: 4 }}>›</div>
+                      width: 28, height: 28, borderRadius: "50%",
+                      border: "3px solid rgba(255,255,255,0.1)",
+                      borderTopColor: "#00C896",
+                      animation: "spin 0.8s linear infinite"
+                    }} />
+                    <div style={{ fontSize: 13, color: "rgba(255,255,255,0.3)" }}>Loading clients…</div>
                   </div>
-                ))}
+                ) : (
+                  clients.map(c => (
+                    <div key={c.id} className="cl-item btn" onClick={() => handleClientSelect(c)} style={{
+                      padding: "16px 24px", display: "flex", alignItems: "center", gap: 16,
+                      borderBottom: "1px solid rgba(255,255,255,0.05)"
+                    }}>
+                      <div style={{
+                        width: 48, height: 48, borderRadius: 14,
+                        background: `${c.accent}15`, border: `2px solid ${c.accent}40`,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 16, fontWeight: 700, color: c.accent, flexShrink: 0,
+                        fontFamily: "Barlow Condensed, sans-serif",
+                      }}>
+                        {c.avatar}
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>{c.name}</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 6, background: `${c.accent}20`, color: c.accent, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.05em" }}>{c.phase.toUpperCase()}</span>
+                          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Wk {c.weekNum}/{c.totalWeeks}</span>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: compColor(c.compliance), fontFamily: "Barlow Condensed" }}>{c.compliance}%</div>
+                        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginTop: 2 }}>Compliance</div>
+                      </div>
+                      <div style={{ color: "rgba(255,255,255,0.2)", fontSize: 18, marginLeft: 4 }}>›</div>
+                    </div>
+                  ))
+                )}
               </div>
 
               <div style={{ padding: 24 }}>
-                <button className="btn" onClick={() => notify("Invite link copied!")} style={{
+                <button className="btn" onClick={() => setShowAddClient(true)} style={{
                   width: "100%", background: "rgba(255,255,255,0.05)",
                   border: "1px dashed rgba(255,255,255,0.2)", borderRadius: 14,
                   padding: "16px", color: "white", fontSize: 14,
@@ -747,7 +1063,7 @@ export default function App() {
           )}
 
           {/* VIEW: CLIENT DETAIL (Week, Body, Build, Chat) */}
-          {view !== "clients" && (
+          {view !== "clients" && client && (
             <>
               {/* Client Header */}
               <div style={{ padding: "0 24px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
@@ -815,62 +1131,70 @@ export default function App() {
                     <div style={{ padding: "0 24px" }}>
                       <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", fontWeight: 700, letterSpacing: "0.05em", marginBottom: 16 }}>This Week's Plan</div>
 
-                      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                        {client.sessions.map((s, i) => {
-                          const tc = typeConfig[s.type];
-                          const donePct = s.type !== "rest" ? Math.round((s.exercises.filter(e=>e.done).length / s.exercises.length) * 100) : 100;
-                          const isActive = activeDay === i;
+                      {client.sessions.length === 0 ? (
+                        <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: "28px 20px", textAlign: "center" }}>
+                          <div style={{ fontSize: 32, marginBottom: 10, opacity: 0.3 }}>📅</div>
+                          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.3)" }}>No sessions planned yet</div>
+                          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.2)", marginTop: 6 }}>Tap + to add a session</div>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                          {client.sessions.map((s, i) => {
+                            const tc = typeConfig[s.type];
+                            const donePct = s.type !== "rest" ? Math.round((s.exercises.filter(e=>e.done).length / s.exercises.length) * 100) : 100;
+                            const isActive = activeDay === i;
 
-                          return (
-                            <div key={i} style={{ background: "rgba(255,255,255,0.03)", border: `1px solid ${isActive ? tc.color+"50" : "rgba(255,255,255,0.08)"}`, borderRadius: 16, overflow: "hidden", transition: "all 0.3s" }}>
-                              {/* Card Header */}
-                              <div className="btn" onClick={() => setActiveDay(isActive ? null : i)} style={{ padding: "16px", display: "flex", alignItems: "center", gap: 16 }}>
-                                <div style={{
-                                  width: 44, height: 44, borderRadius: 12, background: s.status === "done" ? tc.bg : "rgba(255,255,255,0.05)",
-                                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20
-                                }}>{tc.icon}</div>
-                                <div style={{ flex: 1 }}>
-                                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
-                                    <span style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", fontWeight: 700 }}>{s.day}</span>
-                                    <span style={{ fontSize: 10, color: tc.color, fontFamily: "Barlow Condensed", fontWeight: 700, padding: "2px 6px", background: `${tc.color}15`, borderRadius: 4 }}>{tc.label}</span>
+                            return (
+                              <div key={i} style={{ background: "rgba(255,255,255,0.03)", border: `1px solid ${isActive ? tc.color+"50" : "rgba(255,255,255,0.08)"}`, borderRadius: 16, overflow: "hidden", transition: "all 0.3s" }}>
+                                {/* Card Header */}
+                                <div className="btn" onClick={() => setActiveDay(isActive ? null : i)} style={{ padding: "16px", display: "flex", alignItems: "center", gap: 16 }}>
+                                  <div style={{
+                                    width: 44, height: 44, borderRadius: 12, background: s.status === "done" ? tc.bg : "rgba(255,255,255,0.05)",
+                                    display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20
+                                  }}>{tc.icon}</div>
+                                  <div style={{ flex: 1 }}>
+                                    <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                                      <span style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", fontWeight: 700 }}>{s.day}</span>
+                                      <span style={{ fontSize: 10, color: tc.color, fontFamily: "Barlow Condensed", fontWeight: 700, padding: "2px 6px", background: `${tc.color}15`, borderRadius: 4 }}>{tc.label}</span>
+                                    </div>
+                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{s.label}</div>
                                   </div>
-                                  <div style={{ fontSize: 15, fontWeight: 600 }}>{s.label}</div>
+                                  <div style={{ textAlign: "right" }}>
+                                    {s.status === "done" && <div style={{ fontSize: 11, color: "#00C896", fontWeight: 700 }}>DONE</div>}
+                                    {s.status === "missed" && <div style={{ fontSize: 11, color: "#FF4D00", fontWeight: 700 }}>MISSED</div>}
+                                    {s.status === "upcoming" && <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>UPCOMING</div>}
+                                    {s.type !== "rest" && <div style={{ width: 40, marginTop: 6 }}><ProgressBar value={donePct} max={100} color={tc.color} height={3} /></div>}
+                                  </div>
                                 </div>
-                                <div style={{ textAlign: "right" }}>
-                                  {s.status === "done" && <div style={{ fontSize: 11, color: "#00C896", fontWeight: 700 }}>DONE</div>}
-                                  {s.status === "missed" && <div style={{ fontSize: 11, color: "#FF4D00", fontWeight: 700 }}>MISSED</div>}
-                                  {s.status === "upcoming" && <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>UPCOMING</div>}
-                                  {s.type !== "rest" && <div style={{ width: 40, marginTop: 6 }}><ProgressBar value={donePct} max={100} color={tc.color} height={3} /></div>}
-                                </div>
-                              </div>
 
-                              {/* Card Expanded Content */}
-                              {isActive && (
-                                <div style={{ padding: "0 16px 16px", borderTop: "1px solid rgba(255,255,255,0.05)", background: "rgba(0,0,0,0.2)" }}>
-                                  <div style={{ marginTop: 16 }}>
-                                    {s.exercises.map((ex, exIdx) => (
-                                      <div key={exIdx} style={{ display: "flex", alignItems: "center", padding: "10px 0", borderBottom: exIdx === s.exercises.length-1 ? "none" : "1px dashed rgba(255,255,255,0.1)" }}>
-                                        <div style={{ width: 20, fontSize: 14 }}>{ex.done ? "✅" : "○"}</div>
-                                        <div style={{ flex: 1, paddingLeft: 10 }}>
-                                          <div style={{ fontSize: 14, fontWeight: 500 }}>{ex.name}</div>
-                                          <div style={{ display: "flex", gap: 12, marginTop: 4, fontSize: 12, color: "rgba(255,255,255,0.4)", fontFamily: "Barlow Condensed" }}>
-                                            <span>{ex.sets}</span>
-                                            <span>{ex.weight}</span>
+                                {/* Card Expanded Content */}
+                                {isActive && (
+                                  <div style={{ padding: "0 16px 16px", borderTop: "1px solid rgba(255,255,255,0.05)", background: "rgba(0,0,0,0.2)" }}>
+                                    <div style={{ marginTop: 16 }}>
+                                      {s.exercises.map((ex, exIdx) => (
+                                        <div key={exIdx} style={{ display: "flex", alignItems: "center", padding: "10px 0", borderBottom: exIdx === s.exercises.length-1 ? "none" : "1px dashed rgba(255,255,255,0.1)" }}>
+                                          <div style={{ width: 20, fontSize: 14 }}>{ex.done ? "✅" : "○"}</div>
+                                          <div style={{ flex: 1, paddingLeft: 10 }}>
+                                            <div style={{ fontSize: 14, fontWeight: 500 }}>{ex.name}</div>
+                                            <div style={{ display: "flex", gap: 12, marginTop: 4, fontSize: 12, color: "rgba(255,255,255,0.4)", fontFamily: "Barlow Condensed" }}>
+                                              <span>{ex.sets}</span>
+                                              <span>{ex.weight}</span>
+                                            </div>
                                           </div>
+                                          {ex.actual && <div style={{ fontSize: 12, color: ex.done ? "#00C896" : "rgba(255,255,255,0.4)", fontFamily: "Barlow Condensed", textAlign: "right", maxWidth: 80 }}>{ex.actual}</div>}
                                         </div>
-                                        {ex.actual && <div style={{ fontSize: 12, color: ex.done ? "#00C896" : "rgba(255,255,255,0.4)", fontFamily: "Barlow Condensed", textAlign: "right", maxWidth: 80 }}>{ex.actual}</div>}
-                                      </div>
-                                    ))}
+                                      ))}
+                                    </div>
+                                    <button className="btn" onClick={(e) => { e.stopPropagation(); setShowModal(true); }} style={{
+                                      width: "100%", marginTop: 16, background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 10, padding: "10px", color: "white", fontSize: 12, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.05em"
+                                    }}>EDIT SESSION</button>
                                   </div>
-                                  <button className="btn" onClick={(e) => { e.stopPropagation(); setShowModal(true); }} style={{
-                                    width: "100%", marginTop: 16, background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 10, padding: "10px", color: "white", fontSize: 12, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.05em"
-                                  }}>EDIT SESSION</button>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
 
                       {/* Smartwatch Data */}
                       <div style={{ marginTop: 30, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: "20px" }}>
@@ -1094,13 +1418,11 @@ export default function App() {
                 {view === "photos" && (() => {
                   const ANGLES = ["Front", "Back", "Left", "Right"];
 
-                  // Most recent photo per angle
                   const latestByAngle = (angle) =>
                     progressPhotos.find(
                       (p) => (p.angle || "").toLowerCase() === angle.toLowerCase()
                     ) || null;
 
-                  // Group all photos by logged_date descending
                   const dateGroups = progressPhotos.reduce((acc, p) => {
                     const date = p.logged_date || p.created_at?.split("T")[0] || "Unknown";
                     if (!acc[date]) acc[date] = [];
