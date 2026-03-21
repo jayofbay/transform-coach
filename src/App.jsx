@@ -274,6 +274,9 @@ export default function App() {
   const [savingFeedback, setSavingFeedback] = useState(false);
 
 
+  // ── Progress photos ──
+  const [progressPhotos, setProgressPhotos] = useState([]);
+
   // ─── Tick for animated device data ───────────────────────────────────────
   useEffect(() => {
     const t = setInterval(() => setTick(p => p + 1), 4000);
@@ -407,6 +410,27 @@ export default function App() {
   }, [client?.thread_id]);
 
 
+  // ─── Supabase: Fetch progress_photos + real-time subscription ───────────
+  useEffect(() => {
+    if (!client) return;
+    const threadId = client.thread_id;
+    setProgressPhotos([]);
+    supabase
+      .from("progress_photos")
+      .select("*")
+      .eq("thread_id", threadId)
+      .order("created_at", { ascending: false })
+      .then(({ data, error }) => { if (!error && data) setProgressPhotos(data); });
+
+    const channel = supabase
+      .channel(`progress-photos-coach-${threadId}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "progress_photos", filter: `thread_id=eq.${threadId}` },
+        (payload) => setProgressPhotos(prev => prev.some(p => p.id === payload.new.id) ? prev : [payload.new, ...prev]))
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
+  }, [client?.thread_id]);
+
   // ─── Supabase: Fetch invoices + real-time subscription ───────────────────
   useEffect(() => {
     if (!client) return;
@@ -477,6 +501,7 @@ export default function App() {
     // Reset data state — subscriptions will re-fetch on client change
     setMessages([]);
     setFoodPhotos([]);
+    setProgressPhotos([]);
     setInvoices([]);
     setLiveExLogs([]);
   };
@@ -1524,6 +1549,94 @@ export default function App() {
                   </div>
                 )}
 
+                {/* ─── PROGRESS CHECK-INS ─── */}
+                {view === "progress" && (() => {
+                  const ANGLES = ["front", "back", "left", "right"];
+
+                  // Group all photos by logged_date, newest first
+                  const dateGroups = progressPhotos.reduce((acc, p) => {
+                    const date = p.logged_date || p.created_at?.split("T")[0] || "Unknown";
+                    if (!acc[date]) acc[date] = [];
+                    acc[date].push(p);
+                    return acc;
+                  }, {});
+                  const sortedDates = Object.keys(dateGroups).sort((a, b) => b.localeCompare(a));
+
+                  return (
+                    <div className="no-scroll fade-up" style={{ overflowY: "auto", flex: 1, padding: "20px 24px 40px", display: "flex", flexDirection: "column", gap: 28 }}>
+
+                      {/* Empty state */}
+                      {progressPhotos.length === 0 && (
+                        <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: "48px 20px", textAlign: "center" }}>
+                          <div style={{ fontSize: 40, opacity: 0.2, marginBottom: 12 }}>📸</div>
+                          <div style={{ fontSize: 14, color: "rgba(255,255,255,0.35)" }}>No check-ins yet</div>
+                          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.2)", marginTop: 6 }}>Photos uploaded by {client.name} will appear here</div>
+                        </div>
+                      )}
+
+                      {/* One card per check-in date */}
+                      {sortedDates.map((date, di) => {
+                        const photos = dateGroups[date];
+                        const isToday = date === new Date().toISOString().split("T")[0];
+                        const anglesPresent = ANGLES.filter(a => photos.some(p => p.angle === a));
+                        return (
+                          <div key={date}>
+                            {/* Date header */}
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                              <div style={{
+                                background: isToday ? `${client.accent}20` : "rgba(255,255,255,0.06)",
+                                border: `1px solid ${isToday ? client.accent + "40" : "rgba(255,255,255,0.1)"}`,
+                                borderRadius: 10, padding: "6px 14px",
+                              }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: isToday ? client.accent : "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                                  {isToday ? "Today" : new Date(date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                                </div>
+                                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 2 }}>
+                                  {anglesPresent.length}/4 angles · Check-in #{sortedDates.length - di}
+                                </div>
+                              </div>
+                              <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.06)" }} />
+                            </div>
+
+                            {/* 2×2 photo grid for this check-in */}
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                              {ANGLES.map(angle => {
+                                const photo = photos.find(p => p.angle === angle);
+                                return (
+                                  <div key={angle} style={{
+                                    aspectRatio: "1/1", borderRadius: 14, overflow: "hidden", position: "relative",
+                                    background: "rgba(255,255,255,0.04)",
+                                    border: photo ? "1px solid rgba(255,255,255,0.1)" : "1px dashed rgba(255,255,255,0.08)",
+                                    display: "flex", alignItems: "center", justifyContent: "center",
+                                  }}>
+                                    {photo?.public_url ? (
+                                      <>
+                                        <img src={photo.public_url} alt={angle} style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }} />
+                                        <div style={{
+                                          position: "absolute", bottom: 0, left: 0, right: 0,
+                                          background: "linear-gradient(transparent, rgba(0,0,0,0.75))",
+                                          padding: "20px 10px 8px", display: "flex", justifyContent: "space-between", alignItems: "flex-end",
+                                        }}>
+                                          <span style={{ fontSize: 11, fontWeight: 800, fontFamily: "Barlow Condensed", color: "#fff", textTransform: "uppercase", letterSpacing: "0.05em" }}>{angle}</span>
+                                        </div>
+                                      </>
+                                    ) : (
+                                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                                        <span style={{ fontSize: 22, opacity: 0.15 }}>📷</span>
+                                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", textTransform: "uppercase", fontWeight: 700, letterSpacing: 0.5 }}>{angle}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+
                 {/* ─── BILLING ─── */}
                 {view === "billing" && (
                   <div className="fade-up" style={{ padding: "20px 24px 40px", overflowY: "auto", flex: 1 }}>
@@ -1708,6 +1821,7 @@ export default function App() {
                   { id: "body", icon: "📊", label: "Body" },
                   { id: "build", icon: "🛠️", label: "Build" },
                   { id: "chat", icon: "💬", label: "Chat", badge: messages.filter(m => m.sender === "client").length > 0 },
+                  { id: "progress", icon: "📸", label: "Progress", badge: progressPhotos.length > 0 && progressPhotos[0]?.created_at > new Date(Date.now() - 86400000).toISOString() },
                   { id: "billing", icon: "💳", label: "Billing", badge: invoices.some(i => i.status === "pending") },
                 ].map(tab => (
                   <div key={tab.id} onClick={() => setView(tab.id)} style={{
