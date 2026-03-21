@@ -273,8 +273,6 @@ export default function App() {
   const [photoFeedback, setPhotoFeedback] = useState("");
   const [savingFeedback, setSavingFeedback] = useState(false);
 
-  // ── Progress photos ──
-  const [progressPhotos, setProgressPhotos] = useState([]);
 
   // ─── Tick for animated device data ───────────────────────────────────────
   useEffect(() => {
@@ -408,40 +406,6 @@ export default function App() {
       });
   }, [client?.thread_id]);
 
-  // ─── Supabase: Fetch progress_photos + real-time subscription ────────────
-  useEffect(() => {
-    if (!client) return;
-    const threadId = client.thread_id;
-
-    setProgressPhotos([]);
-
-    supabase
-      .from("progress_photos")
-      .select("*")
-      .eq("thread_id", threadId)
-      .order("created_at", { ascending: false })
-      .then(({ data, error }) => {
-        if (!error && data) setProgressPhotos(data);
-      });
-
-    const channel = supabase
-      .channel(`progress-photos-channel-${threadId}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "progress_photos", filter: `thread_id=eq.${threadId}` },
-        (payload) => {
-          setProgressPhotos((prev) => {
-            if (prev.some((p) => p.id === payload.new.id)) return prev;
-            return [payload.new, ...prev];
-          });
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [client?.thread_id]);
 
   // ─── Supabase: Fetch invoices + real-time subscription ───────────────────
   useEffect(() => {
@@ -513,7 +477,6 @@ export default function App() {
     // Reset data state — subscriptions will re-fetch on client change
     setMessages([]);
     setFoodPhotos([]);
-    setProgressPhotos([]);
     setInvoices([]);
     setLiveExLogs([]);
   };
@@ -1561,145 +1524,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* ─── PROGRESS PHOTOS ─── */}
-                {view === "photos" && (() => {
-                  const ANGLES = ["Front", "Back", "Left", "Right"];
-
-                  const latestByAngle = (angle) =>
-                    progressPhotos.find(
-                      (p) => (p.angle || "").toLowerCase() === angle.toLowerCase()
-                    ) || null;
-
-                  const dateGroups = progressPhotos.reduce((acc, p) => {
-                    const date = p.logged_date || p.created_at?.split("T")[0] || "Unknown";
-                    if (!acc[date]) acc[date] = [];
-                    acc[date].push(p);
-                    return acc;
-                  }, {});
-                  const sortedDates = Object.keys(dateGroups).sort((a, b) => b.localeCompare(a));
-
-                  return (
-                    <div className="no-scroll fade-up" style={{ padding: "20px 24px 40px", overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 28 }}>
-
-                      {/* Latest snapshot 2x2 grid */}
-                      <div>
-                        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", fontWeight: 700, letterSpacing: "0.05em", marginBottom: 14 }}>
-                          Latest Snapshot
-                        </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                          {ANGLES.map((angle) => {
-                            const photo = latestByAngle(angle);
-                            const dateLabel = photo
-                              ? (photo.logged_date || photo.created_at?.split("T")[0] || "")
-                              : null;
-                            return (
-                              <div key={angle} style={{
-                                aspectRatio: "1/1", borderRadius: 14, overflow: "hidden",
-                                background: "rgba(255,255,255,0.04)",
-                                border: photo
-                                  ? `1px solid rgba(255,255,255,0.12)`
-                                  : "1.5px dashed rgba(255,255,255,0.15)",
-                                display: "flex", flexDirection: "column", position: "relative",
-                              }}>
-                                {photo && photo.public_url ? (
-                                  <>
-                                    <img
-                                      src={photo.public_url}
-                                      alt={angle}
-                                      style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }}
-                                    />
-                                    <div style={{
-                                      position: "absolute", bottom: 0, left: 0, right: 0,
-                                      background: "linear-gradient(transparent, rgba(0,0,0,0.75))",
-                                      padding: "20px 10px 8px",
-                                      display: "flex", flexDirection: "column", alignItems: "center",
-                                    }}>
-                                      <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "Barlow Condensed", color: "white", textTransform: "uppercase", letterSpacing: "0.05em" }}>{angle}</span>
-                                      {dateLabel && <span style={{ fontSize: 10, color: "rgba(255,255,255,0.6)", marginTop: 2 }}>{dateLabel}</span>}
-                                    </div>
-                                  </>
-                                ) : (
-                                  <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, padding: 12 }}>
-                                    <span style={{ fontSize: 26, opacity: 0.25 }}>📸</span>
-                                    <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "Barlow Condensed", color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{angle}</span>
-                                    <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)" }}>No photo yet</span>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* History grouped by date */}
-                      {sortedDates.length > 0 && (
-                        <div>
-                          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", fontWeight: 700, letterSpacing: "0.05em", marginBottom: 14 }}>
-                            History
-                          </div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-                            {sortedDates.map((date) => {
-                              const photos = dateGroups[date];
-                              return (
-                                <div key={date}>
-                                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.35)", fontWeight: 600, marginBottom: 10 }}>{date}</div>
-                                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
-                                    {ANGLES.map((angle) => {
-                                      const photo = photos.find(
-                                        (p) => (p.angle || "").toLowerCase() === angle.toLowerCase()
-                                      );
-                                      return (
-                                        <div key={angle} style={{
-                                          aspectRatio: "1/1", borderRadius: 10, overflow: "hidden",
-                                          background: "rgba(255,255,255,0.04)",
-                                          border: photo
-                                            ? "1px solid rgba(255,255,255,0.1)"
-                                            : "1px dashed rgba(255,255,255,0.1)",
-                                          display: "flex", alignItems: "center", justifyContent: "center",
-                                          position: "relative",
-                                        }}>
-                                          {photo && photo.public_url ? (
-                                            <>
-                                              <img
-                                                src={photo.public_url}
-                                                alt={angle}
-                                                style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }}
-                                              />
-                                              <div style={{
-                                                position: "absolute", bottom: 0, left: 0, right: 0,
-                                                background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
-                                                padding: "8px 4px 3px", textAlign: "center",
-                                              }}>
-                                                <span style={{ fontSize: 8, fontWeight: 700, fontFamily: "Barlow Condensed", color: "rgba(255,255,255,0.85)", textTransform: "uppercase" }}>{angle}</span>
-                                              </div>
-                                            </>
-                                          ) : (
-                                            <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "Barlow Condensed", textTransform: "uppercase" }}>{angle[0]}</span>
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Empty state */}
-                      {progressPhotos.length === 0 && (
-                        <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: "36px 20px", textAlign: "center" }}>
-                          <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.25 }}>📸</div>
-                          <div style={{ fontSize: 14, color: "rgba(255,255,255,0.35)" }}>No progress photos yet</div>
-                          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.2)", marginTop: 6 }}>Photos logged by the client will appear here</div>
-                        </div>
-                      )}
-
-                    </div>
-                  );
-                })()}
-
                 {/* ─── BILLING ─── */}
                 {view === "billing" && (
                   <div className="fade-up" style={{ padding: "20px 24px 40px", overflowY: "auto", flex: 1 }}>
@@ -1884,7 +1708,6 @@ export default function App() {
                   { id: "body", icon: "📊", label: "Body" },
                   { id: "build", icon: "🛠️", label: "Build" },
                   { id: "chat", icon: "💬", label: "Chat", badge: messages.filter(m => m.sender === "client").length > 0 },
-                  { id: "photos", icon: "📸", label: "Photos" },
                   { id: "billing", icon: "💳", label: "Billing", badge: invoices.some(i => i.status === "pending") },
                 ].map(tab => (
                   <div key={tab.id} onClick={() => setView(tab.id)} style={{
