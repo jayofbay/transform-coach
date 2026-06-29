@@ -127,6 +127,7 @@ create policy "public all" on workout_plans     for all using (true) with check 
 alter publication supabase_realtime add table messages;
 alter publication supabase_realtime add table exercise_logs;
 alter publication supabase_realtime add table food_photo_logs;
+alter publication supabase_realtime add table progress_logs;
 
 -- ─── STORAGE BUCKET (run separately if needed) ───────────────
 -- insert into storage.buckets (id, name, public) values ('food-photos', 'food-photos', true);
