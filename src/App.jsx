@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "./lib/supabase";
+import {
+  FOOD_PHOTOS_BUCKET,
+  PROGRESS_PHOTOS_BUCKET,
+  enrichPhotoWithDisplayUrl,
+  enrichPhotosWithDisplayUrls,
+} from "./lib/photos";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
 // Hardcoded CLIENTS kept as seed/session data reference by thread_id
@@ -399,14 +405,19 @@ export default function App() {
 
     setFoodPhotos([]);
 
-    supabase
-      .from("food_photo_logs")
-      .select("*")
-      .eq("thread_id", threadId)
-      .order("created_at", { ascending: false })
-      .then(({ data, error }) => {
-        if (!error && data) setFoodPhotos(data);
-      });
+    async function fetchFoodPhotos() {
+      const { data, error } = await supabase
+        .from("food_photo_logs")
+        .select("*")
+        .eq("thread_id", threadId)
+        .order("created_at", { ascending: false });
+
+      if (!error && data) {
+        setFoodPhotos(await enrichPhotosWithDisplayUrls(data, FOOD_PHOTOS_BUCKET));
+      }
+    }
+
+    fetchFoodPhotos();
   }, [client?.thread_id]);
 
 
@@ -415,17 +426,28 @@ export default function App() {
     if (!client) return;
     const threadId = client.thread_id;
     setProgressPhotos([]);
-    supabase
-      .from("progress_photos")
-      .select("*")
-      .eq("thread_id", threadId)
-      .order("created_at", { ascending: false })
-      .then(({ data, error }) => { if (!error && data) setProgressPhotos(data); });
+
+    async function fetchProgressPhotos() {
+      const { data, error } = await supabase
+        .from("progress_photos")
+        .select("*")
+        .eq("thread_id", threadId)
+        .order("created_at", { ascending: false });
+
+      if (!error && data) {
+        setProgressPhotos(await enrichPhotosWithDisplayUrls(data, PROGRESS_PHOTOS_BUCKET));
+      }
+    }
+
+    fetchProgressPhotos();
 
     const channel = supabase
       .channel(`progress-photos-coach-${threadId}`)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "progress_photos", filter: `thread_id=eq.${threadId}` },
-        (payload) => setProgressPhotos(prev => prev.some(p => p.id === payload.new.id) ? prev : [payload.new, ...prev]))
+        async (payload) => {
+          const enriched = await enrichPhotoWithDisplayUrl(payload.new, PROGRESS_PHOTOS_BUCKET);
+          setProgressPhotos(prev => prev.some(p => p.id === enriched.id) ? prev : [enriched, ...prev]);
+        })
       .subscribe();
 
     return () => supabase.removeChannel(channel);
@@ -637,8 +659,9 @@ export default function App() {
         .select()
         .single();
       if (data) {
-        setFoodPhotos((prev) => prev.map((p) => (p.id === photo.id ? data : p)));
-        setSelectedPhoto(data);
+        const enriched = await enrichPhotoWithDisplayUrl(data, FOOD_PHOTOS_BUCKET);
+        setFoodPhotos((prev) => prev.map((p) => (p.id === photo.id ? enriched : p)));
+        setSelectedPhoto(enriched);
       }
     }
   };
@@ -654,8 +677,9 @@ export default function App() {
       .single();
     setSavingFeedback(false);
     if (!error && data) {
-      setFoodPhotos((prev) => prev.map((p) => (p.id === data.id ? data : p)));
-      setSelectedPhoto(data);
+      const enriched = await enrichPhotoWithDisplayUrl(data, FOOD_PHOTOS_BUCKET);
+      setFoodPhotos((prev) => prev.map((p) => (p.id === data.id ? enriched : p)));
+      setSelectedPhoto(enriched);
       notify("Feedback saved");
     } else {
       notify("Failed to save feedback", false);
@@ -744,9 +768,9 @@ export default function App() {
             <div className="no-scroll" style={{ flex: 1, overflowY: "auto", padding: 24 }}>
               {/* Photo */}
               <div style={{ borderRadius: 16, overflow: "hidden", marginBottom: 20, background: "rgba(255,255,255,0.05)", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                {selectedPhoto.public_url ? (
+                {selectedPhoto.display_url || selectedPhoto.public_url ? (
                   <img
-                    src={selectedPhoto.public_url}
+                    src={selectedPhoto.display_url || selectedPhoto.public_url}
                     alt={selectedPhoto.caption || "Food photo"}
                     style={{ width: "100%", height: "100%", objectFit: "cover" }}
                   />
@@ -1384,9 +1408,9 @@ export default function App() {
                                   position: "relative", display: "flex", alignItems: "center", justifyContent: "center"
                                 }}
                               >
-                                {photo.public_url ? (
+                                {photo.display_url || photo.public_url ? (
                                   <img
-                                    src={photo.public_url}
+                                    src={photo.display_url || photo.public_url}
                                     alt={photo.caption || "Food"}
                                     style={{ width: "100%", height: "100%", objectFit: "cover" }}
                                   />
@@ -1609,9 +1633,9 @@ export default function App() {
                                     border: photo ? "1px solid rgba(255,255,255,0.1)" : "1px dashed rgba(255,255,255,0.08)",
                                     display: "flex", alignItems: "center", justifyContent: "center",
                                   }}>
-                                    {photo?.public_url ? (
+                                    {photo?.display_url || photo?.public_url ? (
                                       <>
-                                        <img src={photo.public_url} alt={angle} style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }} />
+                                        <img src={photo.display_url || photo.public_url} alt={angle} style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }} />
                                         <div style={{
                                           position: "absolute", bottom: 0, left: 0, right: 0,
                                           background: "linear-gradient(transparent, rgba(0,0,0,0.75))",
