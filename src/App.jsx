@@ -6,6 +6,8 @@ import {
   enrichPhotoWithDisplayUrl,
   enrichPhotosWithDisplayUrls,
 } from "./lib/photos";
+import { buildBodyStatsFromLogs, sortProgressLogs } from "./lib/bodyStats";
+import { mapDbClientToUi as mapDbClientRow } from "./lib/clientMapper";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
 // Hardcoded CLIENTS kept as seed/session data reference by thread_id
@@ -147,66 +149,9 @@ const CLIENTS = [
 const PHASES = ["Cut", "Bulk", "Maintenance", "Peak Week"];
 const GOALS = ["Fat Loss", "Muscle Gain", "Recomp", "Athletic Performance"];
 
-function sortProgressLogs(logs, direction = "asc") {
-  const sorted = [...logs].sort((a, b) => {
-    const dateCmp = (a.logged_date || "").localeCompare(b.logged_date || "");
-    if (dateCmp !== 0) return dateCmp;
-    return (a.created_at || "").localeCompare(b.created_at || "");
-  });
-  return direction === "desc" ? sorted.reverse() : sorted;
-}
-
-function buildBodyStatsFromLogs(client, progressLogs) {
-  const sortedAsc = sortProgressLogs(progressLogs, "asc");
-  const sortedDesc = sortProgressLogs(progressLogs, "desc");
-  const latestLog = sortedDesc[0] || null;
-  const logWeights = sortedAsc.map((log) => log.weight_kg).filter((weight) => weight != null);
-
-  let weightHistory = client.weightHistory;
-  if (logWeights.length === 1) {
-    weightHistory = [client.startWeight, logWeights[0]];
-  } else if (logWeights.length > 1) {
-    weightHistory = [client.startWeight, ...logWeights];
-  }
-
-  return {
-    currentWeight: latestLog?.weight_kg ?? client.weight,
-    currentBodyFat: latestLog?.body_fat_pct ?? client.bodyFat,
-    weightHistory,
-    recentLogs: sortedDesc,
-  };
-}
-
-// ─── Helper: map a DB row to UI client shape ──────────────────────────────────
 function mapDbClientToUi(row) {
-  // Look up seed data by thread_id
-  const seed = CLIENTS.find(c => c.thread_id === row.thread_id);
-  return {
-    id: row.id,
-    thread_id: row.thread_id,
-    name: row.name,
-    avatar: row.avatar || "?",
-    goal: row.goal || "Fat Loss",
-    phase: row.phase || "Cut",
-    accent: row.accent_color || "#FF4D00",
-    watch: row.watch || null,
-    connected: row.connected || false,
-    weight: row.weight || 0,
-    startWeight: row.start_weight || 0,
-    targetWeight: row.target_weight || 0,
-    bodyFat: row.body_fat || 0,
-    startBodyFat: row.start_body_fat || 0,
-    targetBodyFat: row.target_body_fat || 0,
-    weekNum: row.week_num || 1,
-    totalWeeks: row.total_weeks || 16,
-    compliance: row.compliance || 0,
-    streak: row.streak || 0,
-    // Use seed data if available, otherwise empty defaults
-    sessions: seed ? seed.sessions : [],
-    stats: seed ? seed.stats : { calories: 0, protein: 0, steps: 0, sleep: 0, water: 0 },
-    measurements: seed ? seed.measurements : { chest: 0, waist: 0, hips: 0, arms: 0, thighs: 0 },
-    weightHistory: seed ? seed.weightHistory : [row.weight || 0],
-  };
+  const seed = CLIENTS.find((client) => client.thread_id === row.thread_id);
+  return mapDbClientRow(row, seed);
 }
 
 // ─── SUB-COMPONENTS ───────────────────────────────────────────────────────────
