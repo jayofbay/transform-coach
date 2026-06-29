@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "./lib/supabase";
+import {
+  FOOD_PHOTOS_BUCKET,
+  PROGRESS_PHOTOS_BUCKET,
+  enrichPhotoWithDisplayUrl,
+  enrichPhotosWithDisplayUrls,
+} from "./lib/photos";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
 // Hardcoded CLIENTS kept as seed/session data reference by thread_id
@@ -141,6 +147,36 @@ const CLIENTS = [
 const PHASES = ["Cut", "Bulk", "Maintenance", "Peak Week"];
 const GOALS = ["Fat Loss", "Muscle Gain", "Recomp", "Athletic Performance"];
 
+function sortProgressLogs(logs, direction = "asc") {
+  const sorted = [...logs].sort((a, b) => {
+    const dateCmp = (a.logged_date || "").localeCompare(b.logged_date || "");
+    if (dateCmp !== 0) return dateCmp;
+    return (a.created_at || "").localeCompare(b.created_at || "");
+  });
+  return direction === "desc" ? sorted.reverse() : sorted;
+}
+
+function buildBodyStatsFromLogs(client, progressLogs) {
+  const sortedAsc = sortProgressLogs(progressLogs, "asc");
+  const sortedDesc = sortProgressLogs(progressLogs, "desc");
+  const latestLog = sortedDesc[0] || null;
+  const logWeights = sortedAsc.map((log) => log.weight_kg).filter((weight) => weight != null);
+
+  let weightHistory = client.weightHistory;
+  if (logWeights.length === 1) {
+    weightHistory = [client.startWeight, logWeights[0]];
+  } else if (logWeights.length > 1) {
+    weightHistory = [client.startWeight, ...logWeights];
+  }
+
+  return {
+    currentWeight: latestLog?.weight_kg ?? client.weight,
+    currentBodyFat: latestLog?.body_fat_pct ?? client.bodyFat,
+    weightHistory,
+    recentLogs: sortedDesc,
+  };
+}
+
 // ─── Helper: map a DB row to UI client shape ──────────────────────────────────
 function mapDbClientToUi(row) {
   // Look up seed data by thread_id
@@ -277,6 +313,9 @@ export default function App() {
   // ── Progress photos ──
   const [progressPhotos, setProgressPhotos] = useState([]);
 
+  // ── Progress logs (weight / body fat) ──
+  const [progressLogs, setProgressLogs] = useState([]);
+
   // ─── Tick for animated device data ───────────────────────────────────────
   useEffect(() => {
     const t = setInterval(() => setTick(p => p + 1), 4000);
@@ -399,14 +438,19 @@ export default function App() {
 
     setFoodPhotos([]);
 
-    supabase
-      .from("food_photo_logs")
-      .select("*")
-      .eq("thread_id", threadId)
-      .order("created_at", { ascending: false })
-      .then(({ data, error }) => {
-        if (!error && data) setFoodPhotos(data);
-      });
+    async function fetchFoodPhotos() {
+      const { data, error } = await supabase
+        .from("food_photo_logs")
+        .select("*")
+        .eq("thread_id", threadId)
+        .order("created_at", { ascending: false });
+
+      if (!error && data) {
+        setFoodPhotos(await enrichPhotosWithDisplayUrls(data, FOOD_PHOTOS_BUCKET));
+      }
+    }
+
+    fetchFoodPhotos();
   }, [client?.thread_id]);
 
 
@@ -415,17 +459,61 @@ export default function App() {
     if (!client) return;
     const threadId = client.thread_id;
     setProgressPhotos([]);
-    supabase
-      .from("progress_photos")
-      .select("*")
-      .eq("thread_id", threadId)
-      .order("created_at", { ascending: false })
-      .then(({ data, error }) => { if (!error && data) setProgressPhotos(data); });
+
+    async function fetchProgressPhotos() {
+      const { data, error } = await supabase
+        .from("progress_photos")
+        .select("*")
+        .eq("thread_id", threadId)
+        .order("created_at", { ascending: false });
+
+      if (!error && data) {
+        setProgressPhotos(await enrichPhotosWithDisplayUrls(data, PROGRESS_PHOTOS_BUCKET));
+      }
+    }
+
+    fetchProgressPhotos();
 
     const channel = supabase
       .channel(`progress-photos-coach-${threadId}`)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "progress_photos", filter: `thread_id=eq.${threadId}` },
-        (payload) => setProgressPhotos(prev => prev.some(p => p.id === payload.new.id) ? prev : [payload.new, ...prev]))
+        async (payload) => {
+          const enriched = await enrichPhotoWithDisplayUrl(payload.new, PROGRESS_PHOTOS_BUCKET);
+          setProgressPhotos(prev => prev.some(p => p.id === enriched.id) ? prev : [enriched, ...prev]);
+        })
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
+  }, [client?.thread_id]);
+
+  // ─── Supabase: Fetch progress_logs + real-time subscription ─────────────
+  useEffect(() => {
+    if (!client) return;
+    const threadId = client.thread_id;
+    setProgressLogs([]);
+
+    async function fetchProgressLogs() {
+      const { data, error } = await supabase
+        .from("progress_logs")
+        .select("*")
+        .eq("thread_id", threadId)
+        .order("logged_date", { ascending: true })
+        .order("created_at", { ascending: true });
+
+      if (!error && data) setProgressLogs(data);
+    }
+
+    fetchProgressLogs();
+
+    const channel = supabase
+      .channel(`progress-logs-coach-${threadId}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "progress_logs", filter: `thread_id=eq.${threadId}` },
+        (payload) => {
+          setProgressLogs((prev) => {
+            if (prev.some((log) => log.id === payload.new.id)) return prev;
+            return sortProgressLogs([...prev, payload.new], "asc");
+          });
+        })
       .subscribe();
 
     return () => supabase.removeChannel(channel);
@@ -502,6 +590,7 @@ export default function App() {
     setMessages([]);
     setFoodPhotos([]);
     setProgressPhotos([]);
+    setProgressLogs([]);
     setInvoices([]);
     setLiveExLogs([]);
   };
@@ -589,7 +678,8 @@ export default function App() {
   };
 
   const pct = (v, s, t) => Math.round(((v - s) / (t - s)) * 100);
-  const weightPct = client ? pct(client.weight, client.startWeight, client.targetWeight) : 0;
+  const bodyStats = client ? buildBodyStatsFromLogs(client, progressLogs) : null;
+  const weightPct = bodyStats ? pct(bodyStats.currentWeight, client.startWeight, client.targetWeight) : 0;
   const compColor = c => c >= 85 ? "#00C896" : c >= 65 ? "#FFB800" : "#FF4D00";
 
   const typeConfig = {
@@ -637,8 +727,9 @@ export default function App() {
         .select()
         .single();
       if (data) {
-        setFoodPhotos((prev) => prev.map((p) => (p.id === photo.id ? data : p)));
-        setSelectedPhoto(data);
+        const enriched = await enrichPhotoWithDisplayUrl(data, FOOD_PHOTOS_BUCKET);
+        setFoodPhotos((prev) => prev.map((p) => (p.id === photo.id ? enriched : p)));
+        setSelectedPhoto(enriched);
       }
     }
   };
@@ -654,8 +745,9 @@ export default function App() {
       .single();
     setSavingFeedback(false);
     if (!error && data) {
-      setFoodPhotos((prev) => prev.map((p) => (p.id === data.id ? data : p)));
-      setSelectedPhoto(data);
+      const enriched = await enrichPhotoWithDisplayUrl(data, FOOD_PHOTOS_BUCKET);
+      setFoodPhotos((prev) => prev.map((p) => (p.id === data.id ? enriched : p)));
+      setSelectedPhoto(enriched);
       notify("Feedback saved");
     } else {
       notify("Failed to save feedback", false);
@@ -744,9 +836,9 @@ export default function App() {
             <div className="no-scroll" style={{ flex: 1, overflowY: "auto", padding: 24 }}>
               {/* Photo */}
               <div style={{ borderRadius: 16, overflow: "hidden", marginBottom: 20, background: "rgba(255,255,255,0.05)", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                {selectedPhoto.public_url ? (
+                {selectedPhoto.display_url || selectedPhoto.public_url ? (
                   <img
-                    src={selectedPhoto.public_url}
+                    src={selectedPhoto.display_url || selectedPhoto.public_url}
                     alt={selectedPhoto.caption || "Food photo"}
                     style={{ width: "100%", height: "100%", objectFit: "cover" }}
                   />
@@ -1384,9 +1476,9 @@ export default function App() {
                                   position: "relative", display: "flex", alignItems: "center", justifyContent: "center"
                                 }}
                               >
-                                {photo.public_url ? (
+                                {photo.display_url || photo.public_url ? (
                                   <img
-                                    src={photo.public_url}
+                                    src={photo.display_url || photo.public_url}
                                     alt={photo.caption || "Food"}
                                     style={{ width: "100%", height: "100%", objectFit: "cover" }}
                                   />
@@ -1427,7 +1519,7 @@ export default function App() {
                 )}
 
                 {/* ─── BODY STATS ─── */}
-                {view === "body" && (
+                {view === "body" && bodyStats && (
                   <div className="fade-up" style={{ padding: "20px 24px 40px", display: "flex", flexDirection: "column", gap: 20 }}>
 
                     {/* Weight Card */}
@@ -1435,15 +1527,15 @@ export default function App() {
                       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", fontWeight: 700, marginBottom: 16 }}>Weight Progress</div>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 24 }}>
                         <div>
-                          <div style={{ fontFamily: "Barlow Condensed", fontSize: 46, fontWeight: 800, lineHeight: 1 }}>{client.weight}<span style={{ fontSize: 20, color: "rgba(255,255,255,0.4)" }}>kg</span></div>
-                          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", marginTop: 6 }}>{client.goal === "Fat Loss" ? "↓" : "↑"} {Math.abs((client.weight - client.startWeight).toFixed(1))}kg total</div>
+                          <div style={{ fontFamily: "Barlow Condensed", fontSize: 46, fontWeight: 800, lineHeight: 1 }}>{bodyStats.currentWeight}<span style={{ fontSize: 20, color: "rgba(255,255,255,0.4)" }}>kg</span></div>
+                          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", marginTop: 6 }}>{client.goal === "Fat Loss" ? "↓" : "↑"} {Math.abs((bodyStats.currentWeight - client.startWeight).toFixed(1))}kg total</div>
                         </div>
                         <div style={{ textAlign: "right" }}>
                           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Target: {client.targetWeight}kg</div>
-                          <div style={{ fontSize: 14, color: client.accent, fontWeight: 700, marginTop: 4 }}>{Math.abs((client.targetWeight - client.weight).toFixed(1))}kg left</div>
+                          <div style={{ fontSize: 14, color: client.accent, fontWeight: 700, marginTop: 4 }}>{Math.abs((client.targetWeight - bodyStats.currentWeight).toFixed(1))}kg left</div>
                         </div>
                       </div>
-                      <WeightChart history={client.weightHistory} accent={client.accent} />
+                      <WeightChart history={bodyStats.weightHistory} accent={client.accent} />
                       <div style={{ marginTop: 20 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                           <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Overall Progress</span>
@@ -1457,7 +1549,7 @@ export default function App() {
                     <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 20 }}>
                       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", fontWeight: 700, marginBottom: 16 }}>Body Fat</div>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 20 }}>
-                        <div style={{ fontFamily: "Barlow Condensed", fontSize: 46, fontWeight: 800, lineHeight: 1 }}>{client.bodyFat}<span style={{ fontSize: 20, color: "rgba(255,255,255,0.4)" }}>%</span></div>
+                        <div style={{ fontFamily: "Barlow Condensed", fontSize: 46, fontWeight: 800, lineHeight: 1 }}>{bodyStats.currentBodyFat}<span style={{ fontSize: 20, color: "rgba(255,255,255,0.4)" }}>%</span></div>
                         <div style={{ textAlign: "right" }}>
                           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Target: {client.targetBodyFat}%</div>
                         </div>
@@ -1469,7 +1561,7 @@ export default function App() {
                           { label: "Fitness", range: [14, 21], color: "#FFB800" },
                           { label: "Average", range: [21, 28], color: "#FF8C42" },
                         ].map(zone => {
-                          const isActive = client.bodyFat >= zone.range[0] && client.bodyFat < zone.range[1];
+                          const isActive = bodyStats.currentBodyFat >= zone.range[0] && bodyStats.currentBodyFat < zone.range[1];
                           return (
                             <div key={zone.label} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px", background: isActive ? `${zone.color}15` : "transparent", borderRadius: 8 }}>
                               <div style={{ width: 8, height: 8, borderRadius: "50%", background: isActive ? zone.color : "rgba(255,255,255,0.1)", boxShadow: isActive ? `0 0 8px ${zone.color}` : "none" }} />
@@ -1481,6 +1573,53 @@ export default function App() {
                           );
                         })}
                       </div>
+                    </div>
+
+                    {/* Client check-ins from progress_logs */}
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", fontWeight: 700 }}>Client Check-ins</div>
+                        {bodyStats.recentLogs.length > 0 && (
+                          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>{bodyStats.recentLogs.length} logged</div>
+                        )}
+                      </div>
+                      {bodyStats.recentLogs.length === 0 ? (
+                        <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: "28px 20px", textAlign: "center" }}>
+                          <div style={{ fontSize: 32, marginBottom: 10, opacity: 0.3 }}>📈</div>
+                          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.3)" }}>No check-ins logged yet</div>
+                          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.2)", marginTop: 6 }}>Weight and body fat entries from {client.name} will appear here</div>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {bodyStats.recentLogs.map((log) => (
+                            <div key={log.id} style={{
+                              background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)",
+                              borderRadius: 12, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center",
+                            }}>
+                              <div>
+                                <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>
+                                  {new Date((log.logged_date || "") + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                                </div>
+                                {log.notes && <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>{log.notes}</div>}
+                              </div>
+                              <div style={{ display: "flex", gap: 16, textAlign: "right" }}>
+                                {log.weight_kg != null && (
+                                  <div>
+                                    <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: 0.5 }}>Weight</div>
+                                    <div style={{ fontSize: 16, fontWeight: 800, color: client.accent, fontFamily: "Barlow Condensed" }}>{log.weight_kg}kg</div>
+                                  </div>
+                                )}
+                                {log.body_fat_pct != null && (
+                                  <div>
+                                    <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: 0.5 }}>Body Fat</div>
+                                    <div style={{ fontSize: 16, fontWeight: 800, color: "#00C896", fontFamily: "Barlow Condensed" }}>{log.body_fat_pct}%</div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     {/* Measurements Matrix */}
@@ -1609,9 +1748,9 @@ export default function App() {
                                     border: photo ? "1px solid rgba(255,255,255,0.1)" : "1px dashed rgba(255,255,255,0.08)",
                                     display: "flex", alignItems: "center", justifyContent: "center",
                                   }}>
-                                    {photo?.public_url ? (
+                                    {photo?.display_url || photo?.public_url ? (
                                       <>
-                                        <img src={photo.public_url} alt={angle} style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }} />
+                                        <img src={photo.display_url || photo.public_url} alt={angle} style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }} />
                                         <div style={{
                                           position: "absolute", bottom: 0, left: 0, right: 0,
                                           background: "linear-gradient(transparent, rgba(0,0,0,0.75))",
